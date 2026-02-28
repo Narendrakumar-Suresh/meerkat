@@ -23,6 +23,7 @@
   let activeTabId = $state<string | null>(null);
   let rootPath = $state<string | null>(null);
   let recentProjects = $state<string[]>([]);
+  let fileTree: ReturnType<typeof FileTree>;
 
   // Sidebar states
   let showLeftSidebar = $state(true);
@@ -313,12 +314,11 @@
       <div class="sidebar-wrapper" style="width: {leftSidebarWidth}px; display: {showLeftSidebar ? 'flex' : 'none'}">
         <Sidebar title="Explorer">
           {#snippet actions()}
-            <button class="icon-btn" onclick={createNewFile} title="New File"><FilePlus size={14}/></button>
-            <button class="icon-btn" onclick={() => handleOpenFolder()} title="Open Folder"><FolderPlus size={14}/></button>
+            <button class="icon-btn" onclick={() => fileTree?.startCreate('file')} title="New File"><FilePlus size={14}/></button>
+            <button class="icon-btn" onclick={() => fileTree?.startCreate('folder')} title="New Folder"><FolderPlus size={14}/></button>
             <button class="icon-btn" onclick={() => rootPath = rootPath} title="Refresh"><RefreshCw size={14}/></button>
-            <button class="icon-btn" onclick={handleSave} disabled={!activeTab} title="Save"><Save size={14}/></button>
           {/snippet}
-          <FileTree {rootPath} onFileSelect={openFile} />
+          <FileTree bind:this={fileTree} {rootPath} onFileSelect={openFile} />
         </Sidebar>
         <div class="resize-handle left" onmousedown={startResizeLeft} role="separator"></div>
       </div>
