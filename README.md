@@ -37,7 +37,7 @@ A fast, modern code editor built with Tauri, SvelteKit, and Monaco Editor.
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/Narendrakumar-Suresh/meerkat
 cd meerkat
 ```
 
