@@ -4,7 +4,10 @@
   import Sidebar from "$lib/components/Sidebar.svelte";
   import FileTree from "$lib/components/FileTree.svelte";
   import MenuBar from "$lib/components/MenuBar.svelte";
-  import { open, save } from "@tauri-apps/plugin-dialog";
+  import StatusBar from "$lib/components/StatusBar.svelte";
+  import Breadcrumbs from "$lib/components/Breadcrumbs.svelte";
+  import CommandPalette from "$lib/components/CommandPalette.svelte";
+  import { open, save, ask } from "@tauri-apps/plugin-dialog";
   import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
@@ -32,7 +35,89 @@
   let rightSidebarWidth = $state(250);
   let isDarkMode = $state(true);
 
+  // Settings
+  let autoSave = $state(true);
+  let autoSaveDelay = $state(1000); // 1 second
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let wordWrap = $state(false);
+  let tabSize = $state(2);
+  let insertSpaces = $state(true);
+  let cursorPos = $state({ lineNumber: 1, column: 1 });
+
+  // Palette state
+  let showPalette = $state(false);
+  let paletteMode = $state<'command' | 'file'>('file');
+  let projectFiles = $state<{name: string, path: string}[]>([]);
+
   const activeTab = $derived(tabs.find(t => t.id === activeTabId) || null);
+
+  async function scanProjectFiles(dir: string): Promise<{name: string, path: string}[]> {
+    try {
+      const { readDir } = await import('@tauri-apps/plugin-fs');
+      const { join } = await import('@tauri-apps/api/path');
+      const entries = await readDir(dir);
+      let files: {name: string, path: string}[] = [];
+      
+      for (const entry of entries) {
+        const fullPath = await join(dir, entry.name);
+        if (entry.name.startsWith('.') && entry.name !== '.gitignore') continue;
+        if (entry.name === 'node_modules' || entry.name === 'target' || entry.name === 'dist') continue;
+
+        if (entry.isDirectory) {
+          const subFiles = await scanProjectFiles(fullPath);
+          files = [...files, ...subFiles];
+        } else {
+          files.push({ name: entry.name, path: fullPath });
+        }
+      }
+      return files;
+    } catch (err) {
+      console.error("Scan error:", err);
+      return [];
+    }
+  }
+
+  $effect(() => {
+    if (showPalette && paletteMode === 'file' && rootPath) {
+      scanProjectFiles(rootPath).then(files => projectFiles = files);
+    }
+  });
+
+  const commands = $derived([
+    { id: 'new-file', label: 'New File', shortcut: 'Ctrl+N', action: createNewFile },
+    { id: 'open-file', label: 'Open File...', shortcut: 'Ctrl+O', action: handleOpen },
+    { id: 'save-file', label: 'Save File', shortcut: 'Ctrl+S', action: handleSave },
+    { id: 'close-tab', label: 'Close Tab', shortcut: 'Ctrl+W', action: () => activeTabId && closeTab(activeTabId) },
+    { id: 'toggle-explorer', label: 'Toggle Explorer', shortcut: 'Ctrl+B', action: () => showLeftSidebar = !showLeftSidebar },
+    { id: 'toggle-agent', label: 'Toggle Agent', shortcut: 'Ctrl+R', action: () => showRightSidebar = !showRightSidebar },
+    { id: 'toggle-word-wrap', label: 'Toggle Word Wrap', shortcut: 'Alt+Z', action: () => wordWrap = !wordWrap },
+    { id: 'toggle-theme', label: 'Toggle Light/Dark Theme', action: toggleTheme },
+    { id: 'exit', label: 'Exit Meerkat', action: handleExit },
+  ]);
+
+  function handlePaletteSelect(item: any, type: 'command' | 'file') {
+    if (type === 'command') {
+      item.action();
+    } else {
+      openFile(item.path);
+    }
+  }
+
+  function handleFileRename(oldPath: string, newPath: string) {
+    const tab = tabs.find(t => t.path === oldPath);
+    if (tab) {
+      tab.path = newPath;
+      tab.name = newPath.split(/[/\\]/).pop() || 'Untitled';
+      tab.language = getLanguageFromPath(newPath);
+    }
+  }
+
+  function handleFileDelete(path: string) {
+    const tabsToClose = tabs.filter(t => t.path === path || (t.path && t.path.startsWith(path + '/')) || (t.path && t.path.startsWith(path + '\\')));
+    for (const tab of tabsToClose) {
+      closeTab(tab.id);
+    }
+  }
 
   function getLanguageFromPath(path: string | null) {
     if (!path) return "javascript";
@@ -143,11 +228,22 @@
     }
   }
 
-  function closeTab(id: string, e?: MouseEvent) {
+  async function closeTab(id: string, e?: MouseEvent) {
     if (e) e.stopPropagation();
     const index = tabs.findIndex(t => t.id === id);
     if (index === -1) return;
     
+    const tab = tabs[index];
+    if (tab.content !== tab.savedContent) {
+      const confirmed = await ask(`Do you want to save the changes you made to ${tab.name}?`, {
+        title: 'Unsaved Changes',
+        kind: 'warning',
+        okLabel: 'Discard',
+        cancelLabel: 'Cancel'
+      });
+      if (!confirmed) return;
+    }
+
     const newTabs = [...tabs];
     newTabs.splice(index, 1);
     
@@ -175,6 +271,12 @@
   }
 
   async function handleExit() {
+    const hasUnsaved = tabs.some(t => t.content !== t.savedContent);
+    if (hasUnsaved) {
+      if (!window.confirm('You have unsaved changes. Are you sure you want to exit?')) {
+        return;
+      }
+    }
     const win = getCurrentWindow();
     await win.close();
   }
@@ -199,6 +301,12 @@
     }
 
     if (e.ctrlKey || e.metaKey) {
+      if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        paletteMode = e.shiftKey ? 'command' : 'file';
+        showPalette = true;
+        return;
+      }
       switch (e.key.toLowerCase()) {
         case 's': e.preventDefault(); handleSave(); break;
         case 'w': e.preventDefault(); if (activeTabId) closeTab(activeTabId); break;
@@ -290,11 +398,25 @@
     loadSessionData();
 
     window.addEventListener('keydown', handleKeydown);
-    return () => window.removeEventListener('keydown', handleKeydown);
+    return () => {
+      window.removeEventListener('keydown', handleKeydown);
+    };
   });
 
   $effect(() => {
     saveSession();
+  });
+
+  $effect(() => {
+    if (autoSave && activeTab && activeTab.path && activeTab.content !== activeTab.savedContent) {
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(() => {
+        handleSave();
+      }, autoSaveDelay);
+    }
+    return () => {
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    };
   });
 </script>
 
@@ -307,6 +429,14 @@
     onToggleExplorer={() => showLeftSidebar = !showLeftSidebar}
     onToggleAgent={() => showRightSidebar = !showRightSidebar}
     onCloseTab={() => activeTabId && closeTab(activeTabId)}
+    {autoSave}
+    onToggleAutoSave={() => autoSave = !autoSave}
+    {wordWrap}
+    onToggleWordWrap={() => wordWrap = !wordWrap}
+    {tabSize}
+    {insertSpaces}
+    onChangeTabSize={(size) => tabSize = size}
+    onToggleInsertSpaces={() => insertSpaces = !insertSpaces}
   />
 
   <main>
@@ -318,7 +448,13 @@
             <button class="icon-btn" onclick={() => fileTree?.startCreate('folder')} title="New Folder"><FolderPlus size={14}/></button>
             <button class="icon-btn" onclick={() => rootPath = rootPath} title="Refresh"><RefreshCw size={14}/></button>
           {/snippet}
-          <FileTree bind:this={fileTree} {rootPath} onFileSelect={openFile} />
+          <FileTree 
+            bind:this={fileTree} 
+            {rootPath} 
+            onFileSelect={openFile} 
+            onRename={handleFileRename}
+            onDelete={handleFileDelete}
+          />
         </Sidebar>
         <div class="resize-handle left" onmousedown={startResizeLeft} role="separator"></div>
       </div>
@@ -363,11 +499,16 @@
           </div>
           <div class="editor-wrapper">
             {#if activeTab}
+              <Breadcrumbs path={activeTab.path} {rootPath} />
               {#key activeTab.id}
                 <MonacoEditor 
                   bind:value={activeTab.content} 
                   language={activeTab.language} 
                   {isDarkMode}
+                  bind:wordWrap
+                  {tabSize}
+                  {insertSpaces}
+                  onCursorChange={(pos) => cursorPos = pos}
                 />
               {/key}
             {/if}
@@ -391,6 +532,21 @@
       </div>
     </div>
   </main>
+
+  <StatusBar 
+    lineNumber={cursorPos.lineNumber} 
+    column={cursorPos.column} 
+    language={activeTab?.language || "plain text"}
+    indentation={(insertSpaces ? "Spaces: " : "Tabs: ") + tabSize}
+  />
+
+  <CommandPalette 
+    bind:show={showPalette} 
+    bind:mode={paletteMode}
+    {commands}
+    files={projectFiles}
+    onSelect={handlePaletteSelect}
+  />
 </div>
 
 <style>
@@ -412,9 +568,10 @@
     flex-direction: column;
     background-color: var(--background);
     color: var(--foreground);
+    overflow: hidden;
   }
 
-  main { height: calc(100vh - 35px); width: 100vw; flex: 1; }
+  main { height: calc(100vh - 57px); width: 100vw; flex: 1; overflow: hidden; }
 
   .app-layout {
     display: flex;

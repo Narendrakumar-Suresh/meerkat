@@ -19,7 +19,7 @@
 
 <div class="welcome-container">
   <div class="hero">
-    <div class="logo-placeholder">M</div>
+    <img src="/meerkat.png" alt="Meerkat Logo" class="logo" />
     <h1>Meerkat</h1>
     <p class="subtitle">A minimal, polished code editor.</p>
   </div>
@@ -97,19 +97,12 @@
     margin-bottom: 60px;
   }
 
-  .logo-placeholder {
+  .logo {
     width: 64px;
     height: 64px;
-    background: linear-gradient(135deg, var(--primary), var(--accent));
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 32px;
-    font-weight: bold;
     margin: 0 auto 20px;
-    color: var(--primary-foreground);
+    display: block;
+    object-fit: contain;
   }
 
   h1 {
