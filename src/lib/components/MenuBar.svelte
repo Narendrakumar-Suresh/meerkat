@@ -5,7 +5,7 @@
 
   let { 
     onNew, onOpen, onSave, onExit,
-    onToggleExplorer, onToggleAgent,
+    onToggleExplorer, onToggleAgent, onToggleTerminal,
     onCloseTab,
     autoSave = false, onToggleAutoSave,
     wordWrap = false, onToggleWordWrap,
@@ -18,6 +18,7 @@
     onExit: () => void;
     onToggleExplorer: () => void;
     onToggleAgent: () => void;
+    onToggleTerminal?: () => void;
     onCloseTab: () => void;
     autoSave?: boolean;
     onToggleAutoSave?: () => void;
@@ -132,6 +133,8 @@
           <div class="dropdown">
             <button onclick={(e) => handleAction(onToggleExplorer, e)}>Toggle Explorer <span class="shortcut">Ctrl+B</span></button>
             <button onclick={(e) => handleAction(onToggleAgent, e)}>Toggle Agent <span class="shortcut">Ctrl+R</span></button>
+            <div class="divider"></div>
+            <button onclick={(e) => onToggleTerminal && handleAction(onToggleTerminal, e)}>Toggle Terminal <span class="shortcut">Ctrl+`</span></button>
             <div class="divider"></div>
             <button onclick={() => onToggleWordWrap?.()}>
               <span>Word Wrap</span>

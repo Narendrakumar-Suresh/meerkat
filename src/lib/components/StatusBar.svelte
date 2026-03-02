@@ -1,16 +1,20 @@
 <script lang="ts">
+  import { GitBranch } from '@lucide/svelte';
+
   let { 
     lineNumber = 1, 
     column = 1, 
     language = "Plain Text",
     encoding = "UTF-8",
-    indentation = "Spaces: 2"
+    indentation = "Spaces: 2",
+    branch = ""
   } = $props<{
     lineNumber?: number;
     column?: number;
     language?: string;
     encoding?: string;
     indentation?: string;
+    branch?: string;
   }>();
 </script>
 
@@ -19,6 +23,12 @@
     <div class="status-item">
       <span>Ln {lineNumber}, Col {column}</span>
     </div>
+    {#if branch}
+      <div class="status-item clickable">
+        <GitBranch size={12} class="mr-1" />
+        <span>{branch}</span>
+      </div>
+    {/if}
   </div>
   
   <div class="status-right">
@@ -61,6 +71,7 @@
     padding: 0 8px;
     height: 100%;
     transition: all 0.2s;
+    gap: 4px;
   }
 
   .status-item.clickable:hover {
@@ -71,5 +82,9 @@
 
   .capitalize {
     text-transform: capitalize;
+  }
+
+  :global(.mr-1) {
+    margin-right: 4px;
   }
 </style>

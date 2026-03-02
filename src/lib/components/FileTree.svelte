@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { File, Folder, ChevronRight, ChevronDown, Loader2, Edit2, Trash2, FolderPlus, FilePlus, Scissors, ClipboardPaste } from '@lucide/svelte';
   import { readDir, mkdir, writeTextFile, rename, remove, watch } from '@tauri-apps/plugin-fs';
   import { join, dirname, basename } from '@tauri-apps/api/path';
+  import { Command } from '@tauri-apps/plugin-shell';
 
   interface TreeItem {
     name: string;
@@ -11,13 +12,15 @@
     isOpen: boolean;
     children: TreeItem[];
     isLoading: boolean;
+    gitStatus?: 'modified' | 'added' | 'untracked' | 'deleted' | null;
   }
 
-  let { rootPath, onFileSelect, onRename, onDelete } = $props<{
+  let { rootPath, onFileSelect, onRename, onDelete, onFileChange } = $props<{
     rootPath: string | null;
     onFileSelect: (path: string) => void;
     onRename?: (oldPath: string, newPath: string) => void;
     onDelete?: (path: string) => void;
+    onFileChange?: (path: string) => void;
   }>();
 
   let tree = $state<TreeItem[]>([]);
@@ -28,21 +31,69 @@
   let selectedPath = $state<string | null>(null);
   let contextMenu = $state<{ x: number, y: number, item: TreeItem | null } | null>(null);
   
+  // Git state
+  let gitStatuses = $state<Record<string, string>>({});
+  
   // Cut/Paste state
   let clipboardPath = $state<string | null>(null);
   
   let isActionInProgress = false;
   let unwatch: (() => void) | null = null;
 
+  async function fetchGitStatus() {
+    if (!rootPath) return;
+    try {
+      const output = await Command.create('git', ['status', '--porcelain', '-u'], { cwd: rootPath }).execute();
+      if (output.code === 0) {
+        const statuses: Record<string, string> = {};
+        output.stdout.split('\n').forEach(line => {
+          if (line.length < 3) return;
+          const status = line.substring(0, 2).trim();
+          const filePath = line.substring(3).trim().replace(/\"/g, '');
+          statuses[filePath] = status;
+        });
+        gitStatuses = statuses;
+      }
+    } catch (e) {
+      gitStatuses = {};
+    }
+  }
+
+  async function getGitStatusForPath(path: string): Promise<'modified' | 'added' | 'untracked' | 'deleted' | null> {
+    if (!rootPath) return null;
+    let relPath = path.replace(rootPath, '');
+    if (relPath.startsWith('/') || relPath.startsWith('\\')) relPath = relPath.substring(1);
+    relPath = relPath.replace(/\\/g, '/');
+
+    const status = gitStatuses[relPath];
+    if (!status) return null;
+
+    if (status === 'M') return 'modified';
+    if (status === 'A') return 'added';
+    if (status === '??') return 'untracked';
+    if (status === 'D') return 'deleted';
+    return null;
+  }
+
   async function setupWatcher(path: string) {
     if (unwatch) { unwatch(); unwatch = null; }
     try {
+      console.log("[Watcher] Starting watch on:", path);
       const stop = await watch(path, (event) => {
         if (isActionInProgress) return;
-        const type = JSON.stringify(event).toLowerCase();
-        if (type.includes('create') || type.includes('remove') || type.includes('rename')) {
-          refresh();
+        
+        console.log("[Watcher] Event:", JSON.stringify(event));
+        
+        // Comprehensive check for Modify event in Tauri 2.0
+        const isModify = JSON.stringify(event.type).toLowerCase().includes('modify');
+
+        if (isModify && event.paths && event.paths.length > 0) {
+          const changed = event.paths[0];
+          console.log("[Watcher] File modified:", changed);
+          onFileChange?.(changed);
         }
+
+        refresh();
       }, { recursive: true });
       unwatch = stop;
     } catch (err) {
@@ -63,7 +114,8 @@
           isDirectory: entry.isDirectory,
           isOpen: false,
           children: [],
-          isLoading: false
+          isLoading: false,
+          gitStatus: await getGitStatusForPath(fullPath)
         });
       }
       return items.sort((a, b) => {
@@ -92,6 +144,7 @@
 
   async function refresh() {
     if (!rootPath) return;
+    await fetchGitStatus();
     const newTree = await fetchChildren(rootPath);
     await syncOpenStates(tree, newTree);
     tree = newTree;
@@ -252,7 +305,6 @@
 
   async function handlePaste(targetItem: TreeItem | null) {
     if (!clipboardPath) return;
-    
     const sourcePath = clipboardPath;
     const isRoot = !targetItem;
     const targetPath = isRoot ? rootPath! : targetItem!.path;
@@ -302,7 +354,6 @@
   async function onDrop(e: DragEvent, targetPath: string, isDirectory: boolean) {
     e.preventDefault();
     e.stopPropagation();
-    
     const sourcePath = draggedPath || e.dataTransfer?.getData("text/plain");
     if (!sourcePath || sourcePath === targetPath) {
       draggedPath = null;
@@ -314,7 +365,6 @@
       const fileName = await basename(sourcePath);
       const destDir = isDirectory ? targetPath : await dirname(targetPath);
       const sourceDir = await dirname(sourcePath);
-      
       if (destDir !== sourceDir) {
         const newPath = await join(destDir, fileName);
         await rename(sourcePath, newPath);
@@ -380,13 +430,10 @@
         <button onclick={() => startCreate('folder')}><FolderPlus size={14}/> New Folder</button>
         <div class="divider"></div>
       {/if}
-      
       {#if contextMenu.item}
         <button onclick={() => handleCut(contextMenu!.item!)}><Scissors size={14}/> Cut</button>
       {/if}
-      
       <button disabled={!clipboardPath} onclick={() => handlePaste(contextMenu!.item)}><ClipboardPaste size={14}/> Paste</button>
-      
       {#if contextMenu.item}
         <div class="divider"></div>
         <button onclick={() => startRename(contextMenu!.item!)}><Edit2 size={14}/> Rename</button>
@@ -445,7 +492,12 @@
           use:focus
         />
       {:else}
-        <span class="name" title={item.path}>{item.name}</span>
+        <span class="name" class:git-modified={item.gitStatus === 'modified'} class:git-added={item.gitStatus === 'added' || item.gitStatus === 'untracked'} title={item.path}>{item.name}</span>
+        {#if item.gitStatus}
+          <span class="git-indicator" class:modified={item.gitStatus === 'modified'} class:added={item.gitStatus === 'added' || item.gitStatus === 'untracked'}>
+            {item.gitStatus === 'modified' ? 'M' : item.gitStatus === 'untracked' || item.gitStatus === 'added' ? 'U' : ''}
+          </span>
+        {/if}
       {/if}
     </div>
   </div>
@@ -524,6 +576,17 @@
   :global(.file-icon) { color: var(--sidebar-foreground); opacity: 0.6; margin-right: 6px; flex-shrink: 0; }
 
   .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .name.git-modified { color: #e2c08d; }
+  .name.git-added { color: #73c991; }
+
+  .git-indicator {
+    font-size: 10px;
+    font-weight: bold;
+    margin-left: 4px;
+    opacity: 0.8;
+  }
+  .git-indicator.modified { color: #e2c08d; }
+  .git-indicator.added { color: #73c991; }
 
   .rename-input, .input-row input {
     background: var(--background);

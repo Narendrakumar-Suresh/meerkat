@@ -7,11 +7,16 @@
   import StatusBar from "$lib/components/StatusBar.svelte";
   import Breadcrumbs from "$lib/components/Breadcrumbs.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
+  import TerminalPanel from "$lib/components/TerminalPanel.svelte";
+  import SearchPanel from "$lib/components/SearchPanel.svelte";
+  import SettingsModal from "$lib/components/SettingsModal.svelte";
+  import DiffViewer from "$lib/components/DiffViewer.svelte";
   import { open, save, ask } from "@tauri-apps/plugin-dialog";
   import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { Command } from "@tauri-apps/plugin-shell";
   import { onMount } from "svelte";
-  import { FilePlus, FolderPlus, Save, RefreshCw, PanelLeft, PanelRight, Sun, Moon } from '@lucide/svelte';
+  import { FilePlus, FolderPlus, Save, RefreshCw, PanelLeft, PanelRight, Sun, Moon, Search as SearchIcon, File as FileIcon, SplitSquareHorizontal, Settings as SettingsIcon, FileDiff } from '@lucide/svelte';
 
   interface Tab {
     id: string;
@@ -30,10 +35,18 @@
 
   // Sidebar states
   let showLeftSidebar = $state(true);
+  let leftSidebarMode = $state<'explorer' | 'search'>('explorer');
   let showRightSidebar = $state(false);
   let leftSidebarWidth = $state(250);
   let rightSidebarWidth = $state(250);
+  let terminalHeight = $state(200);
+  let showTerminal = $state(false);
   let isDarkMode = $state(true);
+
+  // Split Editor state
+  let isEditorSplit = $state(false);
+  let rightActiveTabId = $state<string | null>(null);
+  let activeGroup = $state<'left' | 'right'>('left');
 
   // Settings
   let autoSave = $state(true);
@@ -42,7 +55,12 @@
   let wordWrap = $state(false);
   let tabSize = $state(2);
   let insertSpaces = $state(true);
+  let fontSize = $state(14);
+  let showSettings = $state(false);
+  let showDiff = $state(false);
   let cursorPos = $state({ lineNumber: 1, column: 1 });
+  let editorScrollToLine = $state<number | null>(null);
+  let gitBranch = $state("");
 
   // Palette state
   let showPalette = $state(false);
@@ -50,6 +68,12 @@
   let projectFiles = $state<{name: string, path: string}[]>([]);
 
   const activeTab = $derived(tabs.find(t => t.id === activeTabId) || null);
+  const rightActiveTab = $derived(tabs.find(t => t.id === rightActiveTabId) || null);
+
+  function normalizePath(p: string | null) {
+    if (!p) return null;
+    return p.replace(/\\/g, '/').toLowerCase();
+  }
 
   async function scanProjectFiles(dir: string): Promise<{name: string, path: string}[]> {
     try {
@@ -77,9 +101,34 @@
     }
   }
 
+  async function fetchGitBranch() {
+    if (!rootPath) {
+      gitBranch = "";
+      return;
+    }
+    try {
+      const output = await Command.create('git', ['branch', '--show-current'], { cwd: rootPath }).execute();
+      if (output.code === 0) {
+        gitBranch = output.stdout.trim();
+      } else {
+        gitBranch = "";
+      }
+    } catch (e) {
+      gitBranch = "";
+    }
+  }
+
   $effect(() => {
     if (showPalette && paletteMode === 'file' && rootPath) {
       scanProjectFiles(rootPath).then(files => projectFiles = files);
+    }
+  });
+
+  $effect(() => {
+    if (rootPath) {
+      fetchGitBranch();
+    } else {
+      gitBranch = "";
     }
   });
 
@@ -88,12 +137,24 @@
     { id: 'open-file', label: 'Open File...', shortcut: 'Ctrl+O', action: handleOpen },
     { id: 'save-file', label: 'Save File', shortcut: 'Ctrl+S', action: handleSave },
     { id: 'close-tab', label: 'Close Tab', shortcut: 'Ctrl+W', action: () => activeTabId && closeTab(activeTabId) },
-    { id: 'toggle-explorer', label: 'Toggle Explorer', shortcut: 'Ctrl+B', action: () => showLeftSidebar = !showLeftSidebar },
+    { id: 'toggle-explorer', label: 'Toggle Explorer', shortcut: 'Ctrl+B', action: () => { showLeftSidebar = !showLeftSidebar; leftSidebarMode = 'explorer'; } },
+    { id: 'toggle-search', label: 'Search across files', shortcut: 'Ctrl+Shift+F', action: () => { showLeftSidebar = true; leftSidebarMode = 'search'; } },
     { id: 'toggle-agent', label: 'Toggle Agent', shortcut: 'Ctrl+R', action: () => showRightSidebar = !showRightSidebar },
+    { id: 'toggle-terminal', label: 'Toggle Terminal', shortcut: 'Ctrl+`', action: () => showTerminal = !showTerminal },
     { id: 'toggle-word-wrap', label: 'Toggle Word Wrap', shortcut: 'Alt+Z', action: () => wordWrap = !wordWrap },
+    { id: 'split-editor', label: 'Split Editor', action: toggleSplitEditor },
+    { id: 'toggle-diff', label: 'Toggle Diff View', action: () => showDiff = !showDiff },
+    { id: 'open-settings', label: 'Open Settings', shortcut: 'Ctrl+,', action: () => showSettings = true },
     { id: 'toggle-theme', label: 'Toggle Light/Dark Theme', action: toggleTheme },
     { id: 'exit', label: 'Exit Meerkat', action: handleExit },
   ]);
+
+  function toggleSplitEditor() {
+    isEditorSplit = !isEditorSplit;
+    if (isEditorSplit && activeTabId) {
+      rightActiveTabId = activeTabId;
+    }
+  }
 
   function handlePaletteSelect(item: any, type: 'command' | 'file') {
     if (type === 'command') {
@@ -119,6 +180,28 @@
     }
   }
 
+  async function handleFileChange(path: string) {
+    const normalizedTarget = normalizePath(path);
+    const tabIndex = tabs.findIndex(t => normalizePath(t.path) === normalizedTarget);
+    
+    if (tabIndex !== -1) {
+      const tab = tabs[tabIndex];
+      // Only reload if we don't have unsaved changes OR if we want to force it
+      // For now let's force it to fix the "stagnant" issue
+      try {
+        const content = await readTextFile(path);
+        console.log(`[FileSync] Reloading ${path}`);
+        tabs[tabIndex] = {
+          ...tab,
+          content,
+          savedContent: content
+        };
+      } catch (e) {
+        console.error("Error reloading file:", path, e);
+      }
+    }
+  }
+
   function getLanguageFromPath(path: string | null) {
     if (!path) return "javascript";
     const ext = path.split('.').pop()?.toLowerCase();
@@ -139,7 +222,8 @@
     try {
       const existingTab = tabs.find(t => t.path === path);
       if (existingTab) {
-        activeTabId = existingTab.id;
+        if (activeGroup === 'left') activeTabId = existingTab.id;
+        else rightActiveTabId = existingTab.id;
         return;
       }
 
@@ -155,7 +239,8 @@
       };
       
       tabs = [...tabs, newTab];
-      activeTabId = newTab.id;
+      if (activeGroup === 'left') activeTabId = newTab.id;
+      else rightActiveTabId = newTab.id;
     } catch (err) {
       if (!silent) console.error("Error opening file:", err);
     }
@@ -190,6 +275,7 @@
       if (selected) {
         rootPath = selected;
         showLeftSidebar = true;
+        leftSidebarMode = 'explorer';
         addToRecentProjects(selected);
       }
     } catch (err) {
@@ -204,9 +290,10 @@
   }
 
   async function handleSave() {
-    if (!activeTab) return;
+    const tabToSave = activeGroup === 'left' ? activeTab : rightActiveTab;
+    if (!tabToSave) return;
     try {
-      let savePath = activeTab.path;
+      let savePath = tabToSave.path;
       if (!savePath) {
         savePath = await save({
           filters: [{
@@ -217,11 +304,11 @@
       }
 
       if (savePath) {
-        await writeTextFile(savePath, activeTab.content);
-        activeTab.path = savePath;
-        activeTab.savedContent = activeTab.content;
-        activeTab.name = savePath.split(/[/\\]/).pop() || 'Untitled';
-        activeTab.language = getLanguageFromPath(savePath);
+        await writeTextFile(savePath, tabToSave.content);
+        tabToSave.path = savePath;
+        tabToSave.savedContent = tabToSave.content;
+        tabToSave.name = savePath.split(/[/\\]/).pop() || 'Untitled';
+        tabToSave.language = getLanguageFromPath(savePath);
       }
     } catch (err) {
       console.error("Save error:", err);
@@ -248,11 +335,12 @@
     newTabs.splice(index, 1);
     
     if (activeTabId === id) {
-      if (newTabs.length > 0) {
-        activeTabId = newTabs[Math.max(0, index - 1)].id;
-      } else {
-        activeTabId = null;
-      }
+      if (newTabs.length > 0) activeTabId = newTabs[Math.max(0, index - 1)].id;
+      else activeTabId = null;
+    }
+    if (rightActiveTabId === id) {
+      if (newTabs.length > 0) rightActiveTabId = newTabs[Math.max(0, index - 1)].id;
+      else rightActiveTabId = null;
     }
     tabs = newTabs;
   }
@@ -267,7 +355,8 @@
       language: 'javascript'
     };
     tabs = [...tabs, newTab];
-    activeTabId = newTab.id;
+    if (activeGroup === 'left') activeTabId = newTab.id;
+    else rightActiveTabId = newTab.id;
   }
 
   async function handleExit() {
@@ -283,14 +372,16 @@
 
   function cycleTabs(reverse = false) {
     if (tabs.length <= 1) return;
-    const currentIndex = tabs.findIndex(t => t.id === activeTabId);
+    const currentId = activeGroup === 'left' ? activeTabId : rightActiveTabId;
+    const currentIndex = tabs.findIndex(t => t.id === currentId);
     let nextIndex;
     if (reverse) {
       nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
     } else {
       nextIndex = (currentIndex + 1) % tabs.length;
     }
-    activeTabId = tabs[nextIndex].id;
+    if (activeGroup === 'left') activeTabId = tabs[nextIndex].id;
+    else rightActiveTabId = tabs[nextIndex].id;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -299,7 +390,22 @@
       cycleTabs(e.shiftKey);
       return;
     }
-
+    if (e.ctrlKey && e.key === '`') {
+      e.preventDefault();
+      showTerminal = !showTerminal;
+      return;
+    }
+    if (e.ctrlKey && e.key === ',') {
+      e.preventDefault();
+      showSettings = true;
+      return;
+    }
+    if (e.ctrlKey && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      showLeftSidebar = true;
+      leftSidebarMode = 'search';
+      return;
+    }
     if (e.ctrlKey || e.metaKey) {
       if (e.key === 'p' || e.key === 'P') {
         e.preventDefault();
@@ -309,7 +415,10 @@
       }
       switch (e.key.toLowerCase()) {
         case 's': e.preventDefault(); handleSave(); break;
-        case 'w': e.preventDefault(); if (activeTabId) closeTab(activeTabId); break;
+        case 'w': e.preventDefault(); 
+          if (activeGroup === 'left' && activeTabId) closeTab(activeTabId);
+          else if (activeGroup === 'right' && rightActiveTabId) closeTab(rightActiveTabId);
+          break;
         case 'o': e.preventDefault(); handleOpen(); break;
         case 'n': e.preventDefault(); createNewFile(); break;
         case 'b': e.preventDefault(); showLeftSidebar = !showLeftSidebar; break;
@@ -321,6 +430,7 @@
   // Resizing logic
   let isResizingLeft = false;
   let isResizingRight = false;
+  let isResizingTerminal = false;
 
   function startResizeLeft(e: MouseEvent) {
     isResizingLeft = true;
@@ -336,6 +446,13 @@
     document.body.style.cursor = 'col-resize';
   }
 
+  function startResizeTerminal(e: MouseEvent) {
+    isResizingTerminal = true;
+    window.addEventListener('mousemove', handleResizeTerminal);
+    window.addEventListener('mouseup', stopResize);
+    document.body.style.cursor = 'row-resize';
+  }
+
   function handleResizeLeft(e: MouseEvent) {
     if (!isResizingLeft) return;
     leftSidebarWidth = Math.max(150, Math.min(e.clientX, 600));
@@ -346,10 +463,17 @@
     rightSidebarWidth = Math.max(150, Math.min(window.innerWidth - e.clientX, 600));
   }
 
+  function handleResizeTerminal(e: MouseEvent) {
+    if (!isResizingTerminal) return;
+    const newHeight = window.innerHeight - e.clientY - 57;
+    terminalHeight = Math.max(100, Math.min(newHeight, window.innerHeight * 0.8));
+  }
+
   function stopResize() {
-    isResizingLeft = false; isResizingRight = false;
+    isResizingLeft = false; isResizingRight = false; isResizingTerminal = false;
     window.removeEventListener('mousemove', handleResizeLeft);
     window.removeEventListener('mousemove', handleResizeRight);
+    window.removeEventListener('mousemove', handleResizeTerminal);
     window.removeEventListener('mouseup', stopResize);
     document.body.style.cursor = 'default';
   }
@@ -360,12 +484,14 @@
     localStorage.setItem('meerkat-theme', isDarkMode ? 'dark' : 'light');
   }
 
-  // Persistence
   function saveSession() {
     const session = {
       rootPath,
       openPaths: tabs.map(t => t.path).filter(p => p !== null),
-      activePath: activeTab?.path || null
+      activePath: activeTab?.path || null,
+      rightActivePath: rightActiveTab?.path || null,
+      isEditorSplit,
+      fontSize, tabSize, insertSpaces, wordWrap
     };
     localStorage.setItem('meerkat-session', JSON.stringify(session));
   }
@@ -383,6 +509,11 @@
       if (savedSession) {
         const session = JSON.parse(savedSession);
         rootPath = session.rootPath;
+        if (session.fontSize) fontSize = session.fontSize;
+        if (session.tabSize) tabSize = session.tabSize;
+        if (session.insertSpaces !== undefined) insertSpaces = session.insertSpaces;
+        if (session.wordWrap !== undefined) wordWrap = session.wordWrap;
+
         if (session.openPaths) {
           for (const path of session.openPaths) {
             await openFile(path, true);
@@ -392,15 +523,19 @@
           const tab = tabs.find(t => t.path === session.activePath);
           if (tab) activeTabId = tab.id;
         }
+        if (session.isEditorSplit) {
+          isEditorSplit = true;
+          if (session.rightActivePath) {
+            const tab = tabs.find(t => t.path === session.rightActivePath);
+            if (tab) rightActiveTabId = tab.id;
+          }
+        }
       }
     };
 
     loadSessionData();
-
     window.addEventListener('keydown', handleKeydown);
-    return () => {
-      window.removeEventListener('keydown', handleKeydown);
-    };
+    return () => window.removeEventListener('keydown', handleKeydown);
   });
 
   $effect(() => {
@@ -414,9 +549,7 @@
         handleSave();
       }, autoSaveDelay);
     }
-    return () => {
-      if (autoSaveTimer) clearTimeout(autoSaveTimer);
-    };
+    return () => { if (autoSaveTimer) clearTimeout(autoSaveTimer); };
   });
 </script>
 
@@ -426,8 +559,9 @@
     onOpen={handleOpen}
     onSave={handleSave}
     onExit={handleExit}
-    onToggleExplorer={() => showLeftSidebar = !showLeftSidebar}
+    onToggleExplorer={() => { showLeftSidebar = !showLeftSidebar; leftSidebarMode = 'explorer'; }}
     onToggleAgent={() => showRightSidebar = !showRightSidebar}
+    onToggleTerminal={() => showTerminal = !showTerminal}
     onCloseTab={() => activeTabId && closeTab(activeTabId)}
     {autoSave}
     onToggleAutoSave={() => autoSave = !autoSave}
@@ -442,19 +576,55 @@
   <main>
     <div class="app-layout">
       <div class="sidebar-wrapper" style="width: {leftSidebarWidth}px; display: {showLeftSidebar ? 'flex' : 'none'}">
-        <Sidebar title="Explorer">
+        <div class="activity-bar">
+          <button class="activity-btn" class:active={leftSidebarMode === 'explorer'} onclick={() => leftSidebarMode = 'explorer'} title="Explorer">
+            <FileIcon size={20} />
+          </button>
+          <button class="activity-btn" class:active={leftSidebarMode === 'search'} onclick={() => leftSidebarMode = 'search'} title="Search (Ctrl+Shift+F)">
+            <SearchIcon size={20} />
+          </button>
+        </div>
+        <Sidebar title={leftSidebarMode === 'explorer' ? "Explorer" : "Search"}>
           {#snippet actions()}
-            <button class="icon-btn" onclick={() => fileTree?.startCreate('file')} title="New File"><FilePlus size={14}/></button>
-            <button class="icon-btn" onclick={() => fileTree?.startCreate('folder')} title="New Folder"><FolderPlus size={14}/></button>
-            <button class="icon-btn" onclick={() => rootPath = rootPath} title="Refresh"><RefreshCw size={14}/></button>
+            {#if leftSidebarMode === 'explorer'}
+              <button class="icon-btn" onclick={() => fileTree?.startCreate('file')} title="New File"><FilePlus size={14}/></button>
+              <button class="icon-btn" onclick={() => fileTree?.startCreate('folder')} title="New Folder"><FolderPlus size={14}/></button>
+              <button class="icon-btn" onclick={() => rootPath = rootPath} title="Refresh"><RefreshCw size={14}/></button>
+            {/if}
           {/snippet}
-          <FileTree 
-            bind:this={fileTree} 
-            {rootPath} 
-            onFileSelect={openFile} 
-            onRename={handleFileRename}
-            onDelete={handleFileDelete}
-          />
+          
+          {#if leftSidebarMode === 'explorer'}
+            <FileTree 
+              bind:this={fileTree} 
+              {rootPath} 
+              onFileSelect={openFile} 
+              onRename={handleFileRename}
+              onDelete={handleFileDelete}
+              onFileChange={handleFileChange}
+            />
+          {:else}
+            <SearchPanel 
+              {rootPath} 
+              onResultSelect={async (path, line, col) => {
+                await openFile(path);
+                editorScrollToLine = line;
+                cursorPos = { lineNumber: line, column: col };
+                setTimeout(() => editorScrollToLine = null, 100);
+              }}
+              onFileReplaced={async (path) => {
+                const normalizedTarget = normalizePath(path);
+                const tabIndex = tabs.findIndex(t => normalizePath(t.path) === normalizedTarget);
+                if (tabIndex !== -1) {
+                  const content = await readTextFile(path);
+                  tabs[tabIndex] = {
+                    ...tabs[tabIndex],
+                    content,
+                    savedContent: content
+                  };
+                }
+              }}
+            />
+          {/if}
         </Sidebar>
         <div class="resize-handle left" onmousedown={startResizeLeft} role="separator"></div>
       </div>
@@ -466,8 +636,11 @@
               {#each tabs as tab (tab.id)}
                 <button 
                   class="tab" 
-                  class:active={activeTabId === tab.id}
-                  onclick={() => activeTabId = tab.id}
+                  class:active={(activeGroup === 'left' && activeTabId === tab.id) || (activeGroup === 'right' && rightActiveTabId === tab.id)}
+                  onclick={() => { 
+                    if (activeGroup === 'left') activeTabId = tab.id;
+                    else rightActiveTabId = tab.id;
+                  }}
                 >
                   <span class="tab-name" title={tab.path || 'Untitled'}>{tab.name}</span>
                   {#if tab.content !== tab.savedContent}
@@ -475,52 +648,64 @@
                   {:else}
                     <span class="dirty-indicator"></span>
                   {/if}
-                  <span 
-                    class="close-btn" 
-                    role="button" 
-                    tabindex="0" 
-                    onclick={(e) => closeTab(tab.id, e)}
-                    onkeydown={(e) => e.key === 'Enter' && closeTab(tab.id)}
-                  >×</span>
+                  <span class="close-btn" role="button" tabindex="0" onclick={(e) => closeTab(tab.id, e)} onkeydown={(e) => e.key === 'Enter' && closeTab(tab.id)}>×</span>
                 </button>
               {/each}
             </div>
             <div class="tab-actions">
-              <button class="icon-btn" onclick={toggleTheme} title="Toggle Theme">
-                {#if isDarkMode}<Sun size={14}/>{:else}<Moon size={14}/>{/if}
-              </button>
-              <button class="icon-btn" onclick={() => showLeftSidebar = !showLeftSidebar} title="Toggle Explorer">
-                <PanelLeft size={14}/>
-              </button>
-              <button class="icon-btn" onclick={() => showRightSidebar = !showRightSidebar} title="Toggle Agent">
-                <PanelRight size={14}/>
-              </button>
+              <button class="icon-btn" class:active={showDiff} onclick={() => showDiff = !showDiff} title="Toggle Diff View"><FileDiff size={14}/></button>
+              <button class="icon-btn" onclick={toggleSplitEditor} title="Split Editor"><SplitSquareHorizontal size={14}/></button>
+              <button class="icon-btn" onclick={toggleTheme} title="Toggle Theme">{#if isDarkMode}<Sun size={14}/>{:else}<Moon size={14}/>{/if}</button>
+              <button class="icon-btn" onclick={() => showSettings = true} title="Settings (Ctrl+,)"><SettingsIcon size={14}/></button>
+              <button class="icon-btn" onclick={() => showLeftSidebar = !showLeftSidebar} title="Toggle Explorer"><PanelLeft size={14}/></button>
+              <button class="icon-btn" onclick={() => showRightSidebar = !showRightSidebar} title="Toggle Agent"><PanelRight size={14}/></button>
             </div>
           </div>
-          <div class="editor-wrapper">
-            {#if activeTab}
-              <Breadcrumbs path={activeTab.path} {rootPath} />
-              {#key activeTab.id}
-                <MonacoEditor 
-                  bind:value={activeTab.content} 
-                  language={activeTab.language} 
-                  {isDarkMode}
-                  bind:wordWrap
-                  {tabSize}
-                  {insertSpaces}
-                  onCursorChange={(pos) => cursorPos = pos}
-                />
-              {/key}
+
+          <div class="editors-container">
+            <div class="editor-wrapper" onclick={() => activeGroup = 'left'} style="border-right: {isEditorSplit ? '1px solid var(--border)' : 'none'}">
+              {#if activeTab}
+                <div class="editor-group-header" class:active={activeGroup === 'left'}>
+                  <Breadcrumbs path={activeTab.path} {rootPath} />
+                </div>
+                {#if showDiff}
+                  <DiffViewer originalValue={activeTab.savedContent} modifiedValue={activeTab.content} language={activeTab.language} {isDarkMode} {fontSize} />
+                {:else}
+                  {#key activeTab.id}
+                    <MonacoEditor bind:value={activeTab.content} language={activeTab.language} {isDarkMode} bind:wordWrap {tabSize} {insertSpaces} {fontSize} scrollToLine={activeGroup === 'left' ? editorScrollToLine : null} onCursorChange={(pos) => { if (activeGroup === 'left') cursorPos = pos; }} />
+                  {/key}
+                {/if}
+              {/if}
+            </div>
+
+            {#if isEditorSplit}
+              <div class="editor-wrapper" onclick={() => activeGroup = 'right'}>
+                {#if rightActiveTab}
+                  <div class="editor-group-header" class:active={activeGroup === 'right'}>
+                    <Breadcrumbs path={rightActiveTab.path} {rootPath} />
+                  </div>
+                  {#if showDiff}
+                    <DiffViewer originalValue={rightActiveTab.savedContent} modifiedValue={rightActiveTab.content} language={rightActiveTab.language} {isDarkMode} {fontSize} />
+                  {:else}
+                    {#key rightActiveTab.id}
+                      <MonacoEditor bind:value={rightActiveTab.content} language={rightActiveTab.language} {isDarkMode} bind:wordWrap {tabSize} {insertSpaces} {fontSize} scrollToLine={activeGroup === 'right' ? editorScrollToLine : null} onCursorChange={(pos) => { if (activeGroup === 'right') cursorPos = pos; }} />
+                    {/key}
+                  {/if}
+                {:else}
+                  <div class="empty-editor" onclick={() => activeGroup = 'right'}>No file selected in split</div>
+                {/if}
+              </div>
             {/if}
           </div>
         {:else}
-          <WelcomeScreen 
-            onNewFile={createNewFile} 
-            onOpenFile={handleOpen} 
-            onOpenFolder={() => handleOpenFolder()} 
-            recentProjects={recentProjects}
-            onOpenRecent={handleOpenFolder}
-          />
+          <WelcomeScreen onNewFile={createNewFile} onOpenFile={handleOpen} onOpenFolder={() => handleOpenFolder()} recentProjects={recentProjects} onOpenRecent={handleOpenFolder} />
+        {/if}
+
+        {#if showTerminal}
+          <div class="resize-handle horizontal" onmousedown={startResizeTerminal} role="separator" aria-orientation="horizontal"></div>
+          <div class="terminal-wrapper" style="height: {terminalHeight}px">
+            <TerminalPanel onClose={() => showTerminal = false} />
+          </div>
         {/if}
       </div>
 
@@ -533,194 +718,48 @@
     </div>
   </main>
 
-  <StatusBar 
-    lineNumber={cursorPos.lineNumber} 
-    column={cursorPos.column} 
-    language={activeTab?.language || "plain text"}
-    indentation={(insertSpaces ? "Spaces: " : "Tabs: ") + tabSize}
-  />
+  <StatusBar lineNumber={cursorPos.lineNumber} column={cursorPos.column} language={(activeGroup === 'left' ? activeTab?.language : rightActiveTab?.language) || "plain text"} indentation={(insertSpaces ? "Spaces: " : "Tabs: ") + tabSize} branch={gitBranch} />
 
-  <CommandPalette 
-    bind:show={showPalette} 
-    bind:mode={paletteMode}
-    {commands}
-    files={projectFiles}
-    onSelect={handlePaletteSelect}
-  />
+  <CommandPalette bind:show={showPalette} bind:mode={paletteMode} {commands} files={projectFiles} onSelect={handlePaletteSelect} />
+
+  <SettingsModal bind:show={showSettings} bind:fontSize bind:tabSize bind:insertSpaces bind:wordWrap bind:autoSave bind:autoSaveDelay />
 </div>
 
 <style>
-  :global(body, html) {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    width: 100%;
-    overflow: hidden;
-    background-color: var(--background);
-    color: var(--foreground);
-    font-family: var(--font-sans);
-  }
-
-  .app-container {
-    height: 100vh;
-    width: 100vw;
-    display: flex;
-    flex-direction: column;
-    background-color: var(--background);
-    color: var(--foreground);
-    overflow: hidden;
-  }
-
+  :global(body, html) { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; background-color: var(--background); color: var(--foreground); font-family: var(--font-sans); }
+  .app-container { height: 100vh; width: 100vw; display: flex; flex-direction: column; background-color: var(--background); color: var(--foreground); overflow: hidden; }
   main { height: calc(100vh - 57px); width: 100vw; flex: 1; overflow: hidden; }
-
-  .app-layout {
-    display: flex;
-    height: 100%;
-    width: 100%;
-    overflow: hidden;
-  }
-
-  .center-content {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    overflow: hidden;
-    background-color: var(--background);
-  }
-
-  .sidebar-wrapper {
-    position: relative;
-    height: 100%;
-    display: flex;
-    flex-shrink: 0;
-  }
-
-  .resize-handle {
-    position: absolute;
-    top: 0;
-    width: 4px;
-    height: 100%;
-    cursor: col-resize;
-    z-index: 10;
-    transition: background-color 0.2s;
-  }
-
+  .app-layout { display: flex; height: 100%; width: 100%; overflow: hidden; }
+  .center-content { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; background-color: var(--background); position: relative; }
+  .sidebar-wrapper { position: relative; height: 100%; display: flex; flex-shrink: 0; }
+  .activity-bar { width: 48px; height: 100%; background-color: var(--muted); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 8px; gap: 12px; }
+  .activity-btn { background: transparent; border: none; color: var(--muted-foreground); width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: var(--radius-md); opacity: 0.7; transition: all 0.2s; }
+  .activity-btn:hover { color: var(--foreground); opacity: 1; }
+  .activity-btn.active { color: var(--foreground); opacity: 1; background-color: var(--accent); }
+  .resize-handle { position: absolute; top: 0; width: 4px; height: 100%; cursor: col-resize; z-index: 10; transition: background-color 0.2s; }
   .resize-handle:hover { background-color: var(--accent); }
   .resize-handle.left { right: -2px; }
   .resize-handle.right { left: -2px; }
-
-  .icon-btn {
-    background: transparent;
-    border: none;
-    color: var(--foreground);
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-    opacity: 0.6;
-    transition: all 0.2s;
-  }
-
-  .icon-btn:hover:not(:disabled) {
-    background-color: var(--accent);
-    opacity: 1;
-  }
-
-  .icon-btn:disabled {
-    opacity: 0.2;
-    cursor: not-allowed;
-  }
-
-  .tab-bar {
-    height: 35px;
-    background-color: var(--muted);
-    display: flex;
-    align-items: center;
-    border-bottom: 1px solid var(--border);
-    padding-right: 8px;
-  }
-
-  .tabs-scroll {
-    flex: 1;
-    display: flex;
-    height: 100%;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
+  .resize-handle.horizontal { width: 100%; height: 4px; cursor: row-resize; position: relative; top: auto; left: auto; right: auto; z-index: 10; }
+  .terminal-wrapper { display: flex; flex-direction: column; width: 100%; flex-shrink: 0; border-top: 1px solid var(--border); }
+  .icon-btn { background: transparent; border: none; color: var(--foreground); width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: var(--radius-sm); opacity: 0.6; transition: all 0.2s; }
+  .icon-btn:hover:not(:disabled) { background-color: var(--accent); opacity: 1; }
+  .icon-btn.active { background-color: var(--accent); opacity: 1; }
+  .icon-btn:disabled { opacity: 0.2; cursor: not-allowed; }
+  .tab-bar { height: 35px; background-color: var(--muted); display: flex; align-items: center; border-bottom: 1px solid var(--border); padding-right: 8px; }
+  .tabs-scroll { flex: 1; display: flex; height: 100%; overflow-x: auto; scrollbar-width: none; }
   .tabs-scroll::-webkit-scrollbar { display: none; }
-
-  .tab-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding-left: 8px;
-    border-left: 1px solid var(--border);
-  }
-
-  .tab {
-    display: flex;
-    align-items: center;
-    padding: 0 12px;
-    min-width: 120px;
-    max-width: 200px;
-    height: 100%;
-    background-color: var(--muted);
-    border: none;
-    border-right: 1px solid var(--border);
-    color: var(--muted-foreground);
-    cursor: pointer;
-    font-size: 12px;
-    transition: all 0.2s;
-  }
-
-  .tab.active {
-    background-color: var(--background);
-    color: var(--foreground);
-  }
-
+  .tab-actions { display: flex; align-items: center; gap: 4px; padding-left: 8px; border-left: 1px solid var(--border); }
+  .tab { display: flex; align-items: center; padding: 0 12px; min-width: 120px; max-width: 200px; height: 100%; background-color: var(--muted); border: none; border-right: 1px solid var(--border); color: var(--muted-foreground); cursor: pointer; font-size: 12px; transition: all 0.2s; }
+  .tab.active { background-color: var(--background); color: var(--foreground); }
   .tab:hover:not(.active) { background-color: var(--accent); color: var(--accent-foreground); }
-
-  .tab-name {
-    flex: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: left;
-  }
-
-  .dirty-indicator {
-    margin: 0 5px;
-    width: 8px;
-    height: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 10px;
-    color: var(--primary);
-  }
-
-  .close-btn {
-    margin-left: 8px;
-    width: 16px;
-    height: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    opacity: 0.5;
-  }
-
+  .tab-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+  .dirty-indicator { margin: 0 5px; width: 8px; height: 8px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--primary); }
+  .close-btn { margin-left: 8px; width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; border-radius: var(--radius-sm); font-size: 14px; opacity: 0.5; }
   .close-btn:hover { background-color: var(--accent); color: var(--foreground); opacity: 1; }
-
-  .editor-wrapper {
-    flex: 1;
-    overflow: hidden;
-    background-color: var(--background);
-  }
+  .editors-container { flex: 1; display: flex; overflow: hidden; width: 100%; }
+  .editor-wrapper { flex: 1; overflow: hidden; background-color: var(--background); display: flex; flex-direction: column; min-width: 0; }
+  .editor-group-header { opacity: 0.5; transition: opacity 0.2s; }
+  .editor-group-header.active { opacity: 1; }
+  .empty-editor { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted-foreground); font-size: 14px; opacity: 0.5; }
 </style>

@@ -3,7 +3,6 @@
   import * as monaco from 'monaco-editor';
   import { X, ChevronDown, ChevronUp, Replace, ReplaceAll, Search, ArrowRight } from '@lucide/svelte';
   import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-  // ... rest of workers ...
   import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
   import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
   import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
@@ -21,6 +20,8 @@
     wordWrap = $bindable(false),
     tabSize = 2,
     insertSpaces = true,
+    fontSize = 14,
+    scrollToLine = null,
     onCursorChange
   } = $props<{
     value?: string;
@@ -29,6 +30,8 @@
     wordWrap?: boolean;
     tabSize?: number;
     insertSpaces?: boolean;
+    fontSize?: number;
+    scrollToLine?: number | null;
     onCursorChange?: (pos: { lineNumber: number, column: number }) => void;
   }>();
 
@@ -45,8 +48,6 @@
   let resultsCount = $state({ current: 0, total: 0 });
 
   function updateTheme() {
-    // ... rest of updateTheme remains same ...
-
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
     const fg = getComputedStyle(document.documentElement).getPropertyValue('--foreground').trim();
     const border = getComputedStyle(document.documentElement).getPropertyValue('--border').trim();
@@ -84,7 +85,6 @@
     const controller = editor.getContribution('editor.contrib.findController') as any;
     if (controller) {
       controller.getState().change({ searchString: findText, isRevealed: true }, true);
-      // We still use Monaco's internal find for the heavy lifting but sync our UI
       editor.getAction('actions.find').run();
     }
   }
@@ -147,19 +147,21 @@
       theme: MEERKAT_DARK_THEME,
       automaticLayout: true,
       minimap: { enabled: false },
-      fontSize: 14,
+      fontSize: fontSize,
       fontFamily: 'JetBrains Mono, Menlo, Monaco, "Courier New", monospace',
       lineNumbers: 'on',
       roundedSelection: false,
       scrollBeyondLastLine: false,
       readOnly: false,
       padding: { top: 10, bottom: 10 },
-      // Disable default find widget to use our own
       find: {
         addExtraSpaceOnTop: false,
         autoFindInSelection: 'never',
         seedSearchStringFromSelection: 'always'
-      }
+      },
+      wordWrap: wordWrap ? 'on' : 'off',
+      tabSize: tabSize,
+      insertSpaces: insertSpaces
     });
 
     // Custom Keybindings
@@ -216,7 +218,7 @@
 
   $effect(() => {
     if (editor && value !== editor.getValue()) {
-      editor.setValue(value);
+      editor.setValue(value || "");
     }
   });
 
@@ -238,6 +240,20 @@
         tabSize: tabSize,
         insertSpaces: insertSpaces
       });
+    }
+  });
+
+  $effect(() => {
+    if (editor && fontSize !== undefined) {
+      editor.updateOptions({ fontSize: fontSize });
+    }
+  });
+
+  $effect(() => {
+    if (editor && scrollToLine !== undefined && scrollToLine !== null) {
+      editor.revealLineInCenter(scrollToLine);
+      editor.setPosition({ lineNumber: scrollToLine, column: 1 });
+      editor.focus();
     }
   });
 
